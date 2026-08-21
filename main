@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#0B0E14; --surface:#12151D; --surface2:#171B25; --border:#232733; --border-soft:#1B1F29;
@@ -192,6 +193,31 @@
     .grid3{grid-template-columns:1fr;}
     .globalsearch{max-width:none;}
   }
+
+  /* ---------- Supabase authentication ---------- */
+  .auth-screen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;
+    background:radial-gradient(circle at 50% 0%,var(--accent-soft),transparent 38%),var(--bg);}
+  .auth-card{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--border);border-radius:16px;
+    padding:28px;box-shadow:0 24px 80px #0005;animation:slideup .22s ease;}
+  .auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:22px;}
+  .auth-mark{width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-ink);
+    display:flex;align-items:center;justify-content:center;font-weight:800;}
+  .auth-card h1{font-size:22px;margin:0 0 5px;letter-spacing:-.02em;}
+  .auth-card .auth-sub{color:var(--text-dim);font-size:13px;margin:0 0 20px;line-height:1.5;}
+  .auth-form{display:flex;flex-direction:column;gap:12px;}
+  .auth-error{min-height:18px;color:var(--neg);font-size:12px;line-height:1.4;}
+  .auth-success{color:var(--pos);font-size:12px;line-height:1.4;}
+  .auth-switch{margin-top:16px;text-align:center;color:var(--text-dim);font-size:12px;}
+  .auth-link{background:none;border:0;color:var(--accent);padding:0;font-weight:600;cursor:pointer;}
+  .auth-divider{height:1px;background:var(--border-soft);margin:18px 0;}
+  .profile-chip{cursor:pointer;}
+  .profile-chip:hover{background:var(--surface2);}
+  .account-email{font-size:10px;color:var(--text-faint);max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  @media(max-width:520px){
+    .auth-screen{padding:14px;}
+    .auth-card{padding:22px;border-radius:14px;}
+    .account-email{display:none;}
+  }
 </style>
 </head>
 <body>
@@ -214,9 +240,35 @@ const ICONS = {
   external:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>'
 };
 
+
+/* ============================== SUPABASE ============================== */
+/*
+  This is a browser app, so use ONLY your Supabase Project URL and
+  Publishable/anon key here. NEVER put the service-role/secret key here.
+
+  Replace the two placeholders below with values from:
+  Supabase -> Project Settings -> API
+*/
+const SUPABASE_URL = "PASTE_YOUR_SUPABASE_PROJECT_URL_HERE";
+const SUPABASE_PUBLISHABLE_KEY = "PASTE_YOUR_SUPABASE_PUBLISHABLE_KEY_HERE";
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+
+let AUTH_SESSION = null;
+let AUTH_READY = false;
+let authMode = "login";
+let authMessage = "";
+let authError = "";
+
+function authUser(){ return AUTH_SESSION ? AUTH_SESSION.user : null; }
+function currentUserName(){
+  const u = authUser();
+  const metadataName = u && u.user_metadata ? (u.user_metadata.name || "") : "";
+  return metadataName || DB.settings.profile.name || (u && u.email ? u.email.split("@")[0] : "Unassigned");
+}
+function currentUserEmail(){ return authUser() && authUser().email ? authUser().email : ""; }
+
 /* ============================== DATA ============================== */
 const PERSONAL_KEY = "overage-db-v2";
-const TEAM_PREFIX = "overage-team-v2-";
 const STATUSES = ["New lead","Skip traced","Contacted","Docs sent","Signed","Filed with county","Paid out","Declined"];
 const FUND_TYPES = ["Tax sale excess funds","Foreclosure surplus","Unclaimed property"];
 const STALE_DAYS = 14;
@@ -286,8 +338,7 @@ function defaultSettings(){
   return {
     themeMode:"dark", themeCustom:null,
     profile: { name:"", initials:"" },
-    team:{ enabled:false, code:"" },
-    finance: { defaultCompanyPct: 30 },
+      finance: { defaultCompanyPct: 30 },
     sidebarCollapsed:false
   };
 }
@@ -298,59 +349,132 @@ let ui = { view:"dashboard", clientModal:null, clientTab:"overview", addOpen:fal
 let pollHandle = null;
 let charts = {};
 
-/* ============================== STORAGE (built-in — no external setup) ============================== */
-function hasStorage(){ return typeof window.storage !== "undefined" && window.storage; }
-function sanitizeCode(code){ return String(code||"").trim().toLowerCase().replace(/[^a-z0-9\-_.]/g,"").slice(0,80); }
-function teamKey(){ return TEAM_PREFIX + sanitizeCode(DB.settings.team.code); }
-function teamActive(){ return DB.settings.team && DB.settings.team.enabled && sanitizeCode(DB.settings.team.code); }
-
-async function storageGet(key, shared){
-  if(!hasStorage()) return null;
-  try{ const r = await window.storage.get(key, !!shared); return r ? r.value : null; }
-  catch(e){ return null; }
-}
-async function storageSet(key, value, shared){
-  if(!hasStorage()) return false;
-  try{ const r = await window.storage.set(key, value, !!shared); return !!r; }
-  catch(e){ console.warn("storage set failed", e); return false; }
-}
+/* ============================== STORAGE / CLOUD ============================== */
 async function loadDB(){
-  const raw = await storageGet(PERSONAL_KEY, false);
-  if(raw){
+  if(!AUTH_SESSION) return;
+
+  // Load per-user settings so theme/profile follow the user across devices.
+  const { data: settingsRow, error: settingsError } = await supabaseClient
+    .from("user_settings")
+    .select("data")
+    .eq("user_id", AUTH_SESSION.user.id)
+    .maybeSingle();
+
+  if(settingsError) console.warn("Could not load user settings:", settingsError.message);
+
+  if(settingsRow && settingsRow.data){
     try{
-      const parsed = JSON.parse(raw);
-      DB.settings = Object.assign(defaultSettings(), parsed.settings||{}, { profile: Object.assign({name:"",initials:""}, (parsed.settings||{}).profile||{}) });
-      DB.clients = Array.isArray(parsed.clients) ? parsed.clients : [];
-    }catch(e){ /* ignore corrupt cache */ }
+      DB.settings = Object.assign(
+        defaultSettings(),
+        settingsRow.data,
+        { profile: Object.assign({name:"",initials:""}, settingsRow.data.profile || {}) }
+      );
+    }catch(e){}
   }
-  if(teamActive()) await loadTeamClients();
-  if(!DB.settings.profile.name) ui.needsProfilePrompt = true;
+
+  // Load the shared registry. Every authenticated user can work in the same registry.
+  const { data: registryRow, error: registryError } = await supabaseClient
+    .from("registry_data")
+    .select("clients")
+    .eq("id", 1)
+    .maybeSingle();
+
+  if(registryError){
+    ui.teamError = "Could not load the shared registry. Check your Supabase table/RLS setup.";
+    console.error(registryError);
+  } else if(registryRow && Array.isArray(registryRow.clients)){
+    DB.clients = registryRow.clients;
+  } else {
+    DB.clients = [];
+  }
+
+  const metadataName = AUTH_SESSION.user.user_metadata && AUTH_SESSION.user.user_metadata.name;
+  if(metadataName){
+    DB.settings.profile = { name: metadataName, initials: initialsFor(metadataName) };
+    ui.needsProfilePrompt = false;
+  } else {
+    ui.needsProfilePrompt = !DB.settings.profile.name;
+  }
 }
-async function loadTeamClients(){
-  const raw = await storageGet(teamKey(), true);
-  if(raw){ try{ DB.clients = JSON.parse(raw); ui.teamError=""; }catch(e){ ui.teamError = "Couldn't read the team workspace data."; } }
-  else { DB.clients = DB.clients || []; }
-}
+
 async function persist(){
-  ui.saving = true; renderSaveBit();
-  const payload = { settings: DB.settings, clients: teamActive() ? [] : DB.clients };
-  await storageSet(PERSONAL_KEY, JSON.stringify(payload), false);
-  if(teamActive()) await storageSet(teamKey(), JSON.stringify(DB.clients), true);
-  ui.saving = false; renderSaveBit();
+  if(!AUTH_SESSION) return;
+  ui.saving = true;
+  renderSaveBit();
+
+  const [registryResult, settingsResult] = await Promise.all([
+    supabaseClient.from("registry_data").upsert({
+      id: 1,
+      clients: DB.clients,
+      updated_at: new Date().toISOString()
+    }, {onConflict:"id"}),
+    supabaseClient.from("user_settings").upsert({
+      user_id: AUTH_SESSION.user.id,
+      data: DB.settings,
+      updated_at: new Date().toISOString()
+    }, {onConflict:"user_id"})
+  ]);
+
+  if(registryResult.error) console.error("Registry save failed:", registryResult.error);
+  if(settingsResult.error) console.error("Settings save failed:", settingsResult.error);
+
+  ui.saving = false;
+  renderSaveBit();
 }
+
 function renderSaveBit(){
   const el = document.getElementById("savebit");
   if(!el) return;
   el.textContent = ui.saving ? "Saving…" : "All changes saved";
 }
-function startTeamPoll(){
+
+function startCloudPoll(){
   if(pollHandle) clearInterval(pollHandle);
-  if(!teamActive()) return;
+  if(!AUTH_SESSION) return;
+
   pollHandle = setInterval(async ()=>{
-    if(ui.clientModal || ui.addOpen) return;
-    await loadTeamClients();
-    render();
-  }, 20000);
+    if(ui.clientModal || ui.addOpen || ui.saving) return;
+
+    const { data, error } = await supabaseClient
+      .from("registry_data")
+      .select("clients")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if(!error && data && Array.isArray(data.clients)){
+      DB.clients = data.clients;
+      render();
+    }
+  }, 15000);
+}
+
+function stopCloudPoll(){
+  if(pollHandle){ clearInterval(pollHandle); pollHandle = null; }
+}
+
+async function migrateLegacyLocalData(){
+  // If the old app was previously used in a normal browser, offer its local data
+  // to the cloud the first time. This is intentionally non-destructive.
+  try{
+    const legacy = localStorage.getItem(PERSONAL_KEY);
+    if(!legacy || DB.clients.length) return false;
+    const parsed = JSON.parse(legacy);
+    if(!parsed || !Array.isArray(parsed.clients) || !parsed.clients.length) return false;
+
+    if(confirm("I found an older local Overage Registry backup in this browser. Upload those cases to the shared cloud registry?")){
+      DB.clients = parsed.clients;
+      if(parsed.settings){
+        DB.settings = Object.assign(defaultSettings(), parsed.settings, {
+          profile: Object.assign({name:"",initials:""}, (parsed.settings||{}).profile||{})
+        });
+      }
+      await persist();
+      return true;
+    }
+  }catch(e){
+    console.warn("Legacy local-data migration skipped:", e);
+  }
+  return false;
 }
 
 /* ============================== UTIL ============================== */
@@ -364,7 +488,7 @@ function escapeHtml(s){ return String(s==null?"":s).replace(/[&<>"']/g, c=>({"&"
 function stateFromCounty(county){ const m = String(county||"").match(/,\s*([A-Z]{2})\s*$/); return m ? m[1] : ""; }
 function initialsFor(name){ return String(name||"?").trim().split(/\s+/).slice(0,2).map(w=>w[0]).join("").toUpperCase() || "?"; }
 function monthLabel(dateStr){ const d = new Date(dateStr); return d.toLocaleString("en-US",{month:"short",year:"2-digit"}); }
-function currentUserName(){ return DB.settings.profile.name || "Unassigned"; }
+/* currentUserName is defined in the Supabase auth section. */
 
 /* ---- financial calc: kept in one place so the formula is easy to change later ---- */
 function calcFinancials(c){
@@ -513,11 +637,135 @@ function parseCSV(text){
   return rows.filter(r=>r.name);
 }
 
+
+/* ============================== AUTH UI ============================== */
+function renderAuth(){
+  const signup = authMode === "signup";
+  const reset = authMode === "reset";
+
+  if(reset){
+    return `
+      <div class="auth-screen">
+        <div class="auth-card">
+          <div class="auth-brand"><div class="auth-mark">OR</div><b>Overage Registry</b></div>
+          <h1>Reset your password</h1>
+          <p class="auth-sub">Enter your account email and Supabase will send you a password-reset link.</p>
+          <form class="auth-form" id="auth-form">
+            <label class="field"><span class="lbl">Email</span><input id="auth-email" class="inp" type="email" autocomplete="email" required></label>
+            <div id="auth-error" class="auth-error">${escapeHtml(authError)}</div>
+            ${authMessage ? `<div class="auth-success">${escapeHtml(authMessage)}</div>` : ""}
+            <button class="btn primary" type="submit">Send reset link</button>
+          </form>
+          <div class="auth-switch"><button class="auth-link" id="auth-back">Back to sign in</button></div>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-brand"><div class="auth-mark">OR</div><b>Overage Registry</b></div>
+        <h1>${signup ? "Create your account" : "Welcome back"}</h1>
+        <p class="auth-sub">${signup ? "Create one of the accounts for your private 5-user workspace." : "Sign in to access the shared registry from any device."}</p>
+        <form class="auth-form" id="auth-form">
+          ${signup ? `<label class="field"><span class="lbl">Name</span><input id="auth-name" class="inp" autocomplete="name" required></label>` : ""}
+          <label class="field"><span class="lbl">Email</span><input id="auth-email" class="inp" type="email" autocomplete="email" required></label>
+          <label class="field"><span class="lbl">Password</span><input id="auth-password" class="inp" type="password" autocomplete="${signup?"new-password":"current-password"}" minlength="6" required></label>
+          <div id="auth-error" class="auth-error">${escapeHtml(authError)}</div>
+          ${authMessage ? `<div class="auth-success">${escapeHtml(authMessage)}</div>` : ""}
+          <button class="btn primary" type="submit">${signup ? "Create account" : "Sign in"}</button>
+        </form>
+        ${!signup ? `<div class="auth-switch"><button class="auth-link" id="auth-reset">Forgot password?</button></div>` : ""}
+        <div class="auth-divider"></div>
+        <div class="auth-switch">
+          ${signup ? `Already have an account? <button class="auth-link" id="auth-login">Sign in</button>`
+                   : `Need an account? <button class="auth-link" id="auth-signup">Create one</button>`}
+        </div>
+      </div>
+    </div>`;
+}
+
+function bindAuth(){
+  const form = document.getElementById("auth-form");
+  if(!form) return;
+
+  form.onsubmit = async (e)=>{
+    e.preventDefault();
+    authError = "";
+    authMessage = "";
+
+    const email = document.getElementById("auth-email").value.trim();
+    if(authMode === "reset"){
+      const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin + window.location.pathname
+      });
+      if(error) authError = error.message;
+      else authMessage = "Check your email for the password reset link.";
+      render();
+      return;
+    }
+
+    const password = document.getElementById("auth-password").value;
+    if(authMode === "signup"){
+      const name = document.getElementById("auth-name").value.trim();
+      const { data, error } = await supabaseClient.auth.signUp({
+        email, password,
+        options:{ data:{ name, initials:initialsFor(name) } }
+      });
+      if(error){ authError = error.message; render(); return; }
+
+      if(data.session){
+        AUTH_SESSION = data.session;
+      }else{
+        authMessage = "Account created. Check your email to confirm the account, then sign in.";
+        render();
+      }
+    }else{
+      const { data, error } = await supabaseClient.auth.signInWithPassword({email, password});
+      if(error){ authError = error.message; render(); return; }
+      AUTH_SESSION = data.session;
+      authMessage = "";
+      authError = "";
+      await finishAuthenticatedBoot();
+    }
+  };
+
+  const signup = document.getElementById("auth-signup");
+  if(signup) signup.onclick = ()=>{ authMode="signup"; authError=""; authMessage=""; render(); };
+
+  const login = document.getElementById("auth-login");
+  if(login) login.onclick = ()=>{ authMode="login"; authError=""; authMessage=""; render(); };
+
+  const reset = document.getElementById("auth-reset");
+  if(reset) reset.onclick = ()=>{ authMode="reset"; authError=""; authMessage=""; render(); };
+
+  const back = document.getElementById("auth-back");
+  if(back) back.onclick = ()=>{ authMode="login"; authError=""; authMessage=""; render(); };
+}
+
+async function finishAuthenticatedBoot(){
+  ui.loading = true;
+  render();
+  await loadDB();
+  await migrateLegacyLocalData();
+  ui.loading = false;
+  render();
+  startCloudPoll();
+}
+
 /* ============================== RENDER ROOT ============================== */
 function render(){
   applyTheme();
   const app = document.getElementById("app");
-  if(ui.loading){ app.innerHTML = `<div class="loading-wrap">LOADING CASE FILES…</div>`; return; }
+  if(!AUTH_READY || ui.loading){
+    app.innerHTML = `<div class="loading-wrap">LOADING OVRAGE REGISTRY…</div>`;
+    return;
+  }
+  if(!AUTH_SESSION){
+    app.innerHTML = renderAuth();
+    bindAuth();
+    return;
+  }
   app.innerHTML = renderShell();
   bindShell();
   renderSaveBit();
@@ -547,7 +795,7 @@ function renderShell(){
     </div>
     <div class="sidefoot">
       <button class="collapse-btn" id="btn-collapse" title="Collapse sidebar">${ICONS.menu}</button>
-      <div class="sync-pill"><span class="dot ${teamActive()?"":"off"}"></span><span class="sidefoot-text">${teamActive() ? `Team: ${escapeHtml(DB.settings.team.code)}` : "Private to you"}</span></div>
+      <div class="sync-pill"><span class="dot ${AUTH_SESSION?"":"off"}"></span><span class="sidefoot-text">${AUTH_SESSION ? "Cloud synced" : "Signed out"}</span></div>
       <div class="savebit sidefoot-text" id="savebit">All changes saved</div>
     </div>
   </div>
@@ -560,7 +808,12 @@ function renderShell(){
           <button data-theme-mode="dark" class="${DB.settings.themeMode!=="light"?"active":""}">Dark</button>
           <button data-theme-mode="light" class="${DB.settings.themeMode==="light"?"active":""}">Light</button>
         </div>
-        <div class="profile-chip"><div class="avatar">${escapeHtml(initialsFor(DB.settings.profile.name))}</div><span>${escapeHtml(DB.settings.profile.name||"Set your name")}</span></div>
+        <div class="profile-chip" title="${escapeHtml(currentUserEmail())}">
+          <div class="avatar">${escapeHtml(initialsFor(currentUserName()))}</div>
+          <span>${escapeHtml(currentUserName())}</span>
+          <span class="account-email">${escapeHtml(currentUserEmail())}</span>
+        </div>
+        <button class="btn sm ghost" id="btn-logout">Log out</button>
       </div>
     </div>
     <div class="main">
@@ -1061,14 +1314,13 @@ function drawReportsCharts(){
 
 /* ---------- Settings ---------- */
 function renderSettings(){
-  const team = DB.settings.team;
-  return `
+    return `
   <div class="eyebrow">Settings</div>
-  <h1 class="title">Profile, appearance, data &amp; sharing</h1>
+  <h1 class="title">Profile, appearance, data &amp; account</h1>
 
   <div class="card">
     <h3>Profile</h3>
-    <p class="subtle">Your name tags every case you create or edit as "Created by" / "Last modified by." This is a lightweight identity for a shared workspace — not a password-protected account (see the note under Team workspace below for why).</p>
+    <p class="subtle">Your name tags every case you create or edit as "Created by" / "Last modified by." Your name is stored with your authenticated account and is used for case history.</p>
     <label class="field" style="margin-top:10px;max-width:280px;"><span class="lbl">Your name</span><input id="profile-name" class="inp" value="${escapeHtml(DB.settings.profile.name)}"/></label>
     <button id="profile-save" class="btn ghost" style="margin-top:8px;">Save name</button>
   </div>
@@ -1100,21 +1352,19 @@ function renderSettings(){
   </div>
 
   <div class="card">
-    <h3>Team workspace</h3>
-    <p class="subtle">This app has no server of its own, so there's no password-based login — turning this on shares your case list with anyone who has the workspace code, using this platform's built-in shared storage. No account setup needed on either side.</p>
-    <p class="subtle" style="color:var(--neg);margin-top:6px;"><b>Treat the code like a shared password</b> — anyone with it can see and change every case in this workspace. For real access control per person, this would need a proper backend with accounts; this is the local/offline-friendly alternative.</p>
-    <label class="toggle" style="margin-top:12px;"><input type="checkbox" id="team-toggle" ${team.enabled?"checked":""}/><span>Share this list with a team workspace</span></label>
-    <label class="field" style="margin-top:10px;max-width:320px;"><span class="lbl">Workspace code</span><input id="team-code" class="inp" placeholder="e.g. dan-and-alex-overage" value="${escapeHtml(team.code)}" /></label>
-    ${ui.teamError ? `<p class="subtle" style="color:var(--neg);margin-top:6px;">${escapeHtml(ui.teamError)}</p>` : ""}
-    <div style="display:flex;gap:8px;margin-top:10px;">
-      <button id="team-save" class="btn primary">Save sharing settings</button>
-      ${team.enabled ? `<button id="team-refresh" class="btn ghost">Refresh now</button>` : ""}
-    </div>
+    <h3>Account &amp; shared workspace</h3>
+    <p class="subtle">Signed in as <b>${escapeHtml(currentUserEmail())}</b>. Your cases are stored in Supabase so the same registry is available from your other devices and to your other approved users.</p>
+    <p class="subtle" style="margin-top:6px;">Access is controlled by Supabase authentication instead of the old workspace code. Keep account creation limited to the people you want to invite.</p>
+    <button id="settings-logout" class="btn danger sm" style="margin-top:8px;">Log out</button>
   </div>`;
 }
 
 /* ============================== BIND EVENTS ============================== */
 function bindShell(){
+  const logout = document.getElementById("btn-logout");
+  if(logout) logout.onclick = async ()=>{
+    await supabaseClient.auth.signOut();
+  };
   document.querySelectorAll("[data-nav]").forEach(el=>{
     el.onclick = ()=>{ ui.view = el.getAttribute("data-nav"); ui.search=""; ui.clientModal=null; ui.addOpen=false; ui.mobileNavOpen=false; render(); };
   });
@@ -1133,6 +1383,8 @@ function bindShell(){
     const v = document.getElementById("profile-name-inline").value.trim();
     if(!v) return;
     DB.settings.profile = { name:v, initials:initialsFor(v) };
+    const { error } = await supabaseClient.auth.updateUser({ data:{ name:v, initials:initialsFor(v) } });
+    if(error){ alert("Could not update your account name: " + error.message); return; }
     ui.needsProfilePrompt = false;
     await persist(); render();
   };
@@ -1266,6 +1518,10 @@ function bindSettings(){
   if(pName) pName.onclick = async ()=>{
     const v = document.getElementById("profile-name").value.trim();
     DB.settings.profile = { name:v, initials:initialsFor(v) };
+    if(v){
+      const { error } = await supabaseClient.auth.updateUser({ data:{ name:v, initials:initialsFor(v) } });
+      if(error){ alert("Could not update your account name: " + error.message); return; }
+    }
     ui.needsProfilePrompt = !v;
     await persist(); render();
   };
@@ -1297,27 +1553,40 @@ function bindSettings(){
     reader.readAsText(file);
   };
 
-  const teamSave = document.getElementById("team-save");
-  if(teamSave) teamSave.onclick = async ()=>{
-    const enabled = document.getElementById("team-toggle").checked;
-    const code = document.getElementById("team-code").value.trim();
-    if(enabled && !code){ ui.teamError = "Enter a workspace code before turning sharing on."; render(); return; }
-    ui.teamError = "";
-    DB.settings.team = { enabled, code };
-    if(enabled){ await loadTeamClients(); startTeamPoll(); } else if(pollHandle){ clearInterval(pollHandle); }
-    await persist(); render();
+  const settingsLogout = document.getElementById("settings-logout");
+  if(settingsLogout) settingsLogout.onclick = async ()=>{
+    await supabaseClient.auth.signOut();
   };
-  const refreshBtn = document.getElementById("team-refresh");
-  if(refreshBtn) refreshBtn.onclick = async ()=>{ await loadTeamClients(); render(); };
 }
 
 /* ============================== BOOT ============================== */
 (async function boot(){
-  render();
-  await loadDB();
+  try{
+    const { data } = await supabaseClient.auth.getSession();
+    AUTH_SESSION = data.session || null;
+  }catch(e){
+    console.error("Supabase session check failed:", e);
+    authError = "Could not connect to Supabase. Check your project URL/key.";
+  }
+
+  AUTH_READY = true;
   ui.loading = false;
   render();
-  startTeamPoll();
+
+  supabaseClient.auth.onAuthStateChange(async (_event, session)=>{
+    AUTH_SESSION = session || null;
+
+    if(AUTH_SESSION){
+      await finishAuthenticatedBoot();
+    }else{
+      stopCloudPoll();
+      DB = { clients: [], settings: defaultSettings() };
+      ui = { view:"dashboard", clientModal:null, clientTab:"overview", addOpen:false, search:"", statusFilter:"All",
+        countyFilter:"All", creatorFilter:"All", sortBy:"dateAdded", importRows:null, loading:false, saving:false,
+        teamError:"", mobileNavOpen:false, openAccordion:null, needsProfilePrompt:false };
+      render();
+    }
+  });
 })();
 </script>
 </body>
